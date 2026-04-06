@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: cabane-bridge
     env: node
     plan: free
