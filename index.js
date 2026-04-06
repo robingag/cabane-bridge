@@ -11,21 +11,8 @@ const TIMEZONE = 'America/Montreal';
 const HIST_DAYS = 30;
 const PORT = process.env.PORT || 3000;
 
-// --- HTTP health-check server (required for Render Web Service) ---
-
-const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('OK');
-  } else {
-    res.writeHead(404);
-    res.end('Not Found');
-  }
-});
-
-server.listen(PORT, () => {
-  log(`Health-check HTTP server listening on port ${PORT}`);
-});
+// --- MQTT client reference (set after connect) ---
+let mqttClient = null;
 
 // --- State ---
 
@@ -101,6 +88,64 @@ function publishHistory(client, deviceId) {
   });
 }
 
+// --- HTTP server ---
+
+const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('OK');
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/seed') {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const deviceId = data.deviceId || '5ea48c';
+
+        // Update galToday
+        if (data.galToday) {
+          const { date, gal, cycles } = data.galToday;
+          dailyTotals.set(deviceId, { date, gal: Number(gal), cycles: Number(cycles) });
+          log(`[${deviceId}] seed galToday: ${date} = ${gal} gal, ${cycles} cycles`);
+          if (mqttClient && mqttClient.connected) {
+            publishDaily(mqttClient, deviceId);
+          }
+        }
+
+        // Update galHist
+        if (data.galHist && Array.isArray(data.galHist)) {
+          let hist = data.galHist.map(h => ({ date: h.date, gal: Number(h.gal) }));
+          hist.sort((a, b) => (a.date > b.date ? 1 : -1));
+          if (hist.length > HIST_DAYS) hist = hist.slice(-HIST_DAYS);
+          galHistory.set(deviceId, hist);
+          log(`[${deviceId}] seed galHist: ${hist.length} entrees`);
+          if (mqttClient && mqttClient.connected) {
+            publishHistory(mqttClient, deviceId);
+          }
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, deviceId }));
+      } catch (e) {
+        log('seed parse error:', e.message);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  res.writeHead(404);
+  res.end('Not Found');
+});
+
+server.listen(PORT, () => {
+  log(`Health-check HTTP server listening on port ${PORT}`);
+});
+
 // --- Midnight reset scheduler ---
 
 function scheduleMidnightReset(client) {
@@ -136,6 +181,8 @@ function connect() {
     connectTimeout: 30 * 1000,
     keepalive: 60,
   });
+
+  mqttClient = client;
 
   client.on('connect', () => {
     log('Connecte au broker MQTT');
